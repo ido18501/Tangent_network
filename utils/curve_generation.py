@@ -311,6 +311,7 @@ def generate_random_simple_fourier_curve(
     fit_to_canvas: bool = True,
     min_size: float = 0.25,
     max_size: float = 0.95,
+    enforce_simple: bool = False,
 ) -> tuple[Array, BasisExpansionCurveCoeffs]:
     """
     Generate a random non-self-intersecting Fourier curve.
@@ -331,6 +332,28 @@ def generate_random_simple_fourier_curve(
 
     if rng is None:
         rng = np.random.default_rng()
+
+    if not enforce_simple:
+        points, coeffs = generate_random_fourier_curve(
+            t=t,
+            max_freq=max_freq,
+            scale=scale,
+            decay_power=decay_power,
+            rng=rng,
+        )
+
+        if center:
+            points = center_curve(points)
+
+        if fit_to_canvas:
+            points = fit_curve_to_canvas_with_random_size(
+                points,
+                rng=rng,
+                min_size=min_size,
+                max_size=max_size,
+            )
+
+        return points, coeffs
 
     for _ in range(max_tries):
         points, coeffs = generate_random_fourier_curve(
