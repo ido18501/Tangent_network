@@ -17,8 +17,8 @@ def build_dataset(size, seed):
         patch_size=9,
         half_width=14,
         num_negatives=8,
-        negative_min_offset=6,
-        negative_max_offset=30,
+        negative_min_offset=15,
+        negative_max_offset=45,
         seed=seed,
     )
 
