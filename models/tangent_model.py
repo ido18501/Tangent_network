@@ -254,3 +254,82 @@ class TangentPatchEmbeddingModel(nn.Module):
         z = F.normalize(z, p=2, dim=-1, eps=self.eps)
 
         return z
+
+
+class TangentOperatorModel(nn.Module):
+    """
+    Learns a linear operator over patch points.
+
+    Input:
+        x : (B, P, 2)
+
+    Output:
+        weights : (B, P)
+        predicted_vector : (B, 2)
+    """
+
+    def __init__(
+        self,
+        patch_size: int,
+        point_dim: int = 2,
+        point_mlp_dims: list[int] | None = None,
+        head_dims: list[int] | None = None,
+        use_batchnorm: bool = True,
+        point_dropout: float = 0.0,
+        head_dropout: float = 0.0,
+        eps: float = 1e-12,
+    ):
+        super().__init__()
+
+        if point_mlp_dims is None:
+            point_mlp_dims = [64, 64, 128]
+
+        if head_dims is None:
+            head_dims = [128, 64]
+
+        self.patch_size = patch_size
+        self.eps = eps
+
+        self.point_encoder = SharedMLP(
+            in_dim=point_dim,
+            hidden_dims=point_mlp_dims,
+            use_batchnorm=use_batchnorm,
+            dropout=point_dropout,
+        )
+
+        feature_dim = point_mlp_dims[-1]
+        pooled_dim = 2 * feature_dim
+
+        # operator head outputs patch_size weights
+        self.operator_head = MLPHead(
+            in_dim=pooled_dim,
+            hidden_dims=head_dims,
+            out_dim=patch_size,
+            dropout=head_dropout,
+        )
+
+    def forward(self, x: torch.Tensor):
+
+        B, P, _ = x.shape
+
+        point_features = self.point_encoder(x)
+
+        mean_feat = point_features.mean(dim=1)
+        max_feat = point_features.max(dim=1).values
+
+        patch_feature = torch.cat([mean_feat, max_feat], dim=-1)
+
+        raw_weights = self.operator_head(patch_feature)  # (B,P)
+
+        # enforce derivative property: sum weights = 0
+        weights = raw_weights - raw_weights.mean(dim=-1, keepdim=True)
+
+        # compute predicted vector
+        predicted_vec = torch.einsum("bp,bpd->bd", weights, x)
+
+        predicted_vec = F.normalize(predicted_vec, dim=-1, eps=self.eps)
+
+        return {
+            "weights": weights,
+            "vector": predicted_vec
+        }

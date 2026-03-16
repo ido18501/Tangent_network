@@ -228,3 +228,89 @@ class TripletMarginLossWithHardNegatives(nn.Module):
 
         loss = F.relu(pos_dist - hardest_neg_dist + self.margin).mean()
         return loss
+
+
+
+
+
+class OperatorEquivarianceLoss(nn.Module):
+
+    def __init__(
+        self,
+        lambda_reg: float = 1e-4,
+        lambda_neg: float = 0.1,
+        neg_margin: float = 0.3,
+        eps: float = 1e-12,
+    ):
+        super().__init__()
+
+        self.lambda_reg = lambda_reg
+        self.lambda_neg = lambda_neg
+        self.neg_margin = neg_margin
+        self.eps = eps
+
+    def forward(
+        self,
+        v_anchor,
+        v_positive,
+        weights_anchor,
+        transform_matrix,
+        v_negatives=None,
+        return_stats=False,
+    ):
+        # ---------------------------
+        # equivariance
+        # ---------------------------
+
+        target = torch.einsum("bij,bj->bi", transform_matrix, v_anchor)
+
+        target = F.normalize(target, dim=-1, eps=self.eps)
+        v_positive = F.normalize(v_positive, dim=-1, eps=self.eps)
+
+        cosine_pos = torch.sum(target * v_positive, dim=-1)
+
+        equiv_loss = 1 - cosine_pos.mean()
+
+        # ---------------------------
+        # weight regularization
+        # ---------------------------
+
+        reg_loss = weights_anchor.pow(2).mean()
+
+        # ---------------------------
+        # negatives (optional)
+        # ---------------------------
+
+        neg_loss = torch.tensor(0.0, device=v_anchor.device)
+
+        if v_negatives is not None:
+
+            v_anchor_n = F.normalize(v_anchor, dim=-1, eps=self.eps)
+            v_neg = F.normalize(v_negatives, dim=-1, eps=self.eps)
+
+            cosine_neg = torch.einsum("bd,bmd->bm", v_anchor_n, v_neg)
+
+            neg_loss = F.relu(cosine_neg - self.neg_margin).mean()
+
+        # ---------------------------
+        # total loss
+        # ---------------------------
+
+        loss = (
+            equiv_loss
+            + self.lambda_reg * reg_loss
+            + self.lambda_neg * neg_loss
+        )
+
+        if not return_stats:
+            return loss
+
+        stats = {
+            "loss": float(loss.detach().item()),
+            "equiv_loss": float(equiv_loss.detach().item()),
+            "reg_loss": float(reg_loss.detach().item()),
+            "neg_loss": float(neg_loss.detach().item()),
+            "pos_alignment": float(cosine_pos.mean().detach().item()),
+        }
+
+        return loss, stats

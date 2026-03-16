@@ -25,7 +25,6 @@ class TangentTrainer:
         grad_clip_norm=None,
         checkpoint_dir="checkpoints",
     ):
-
         self.model = model
         self.optimizer = optimizer
         self.loss_fn = loss_fn
@@ -38,44 +37,58 @@ class TangentTrainer:
         self.checkpoint_dir.mkdir(exist_ok=True)
 
     def _move_batch(self, batch: TangentBatch):
-
         batch.anchor = batch.anchor.to(self.device)
         batch.positive = batch.positive.to(self.device)
-        batch.negatives = batch.negatives.to(self.device)
+
+        # new: we need the linear transform matrix A
+        batch.transform_matrix = batch.transform_matrix.to(self.device)
 
         return batch
 
-    def _embed(self, batch):
+    def _forward_pair(self, batch: TangentBatch):
+        """
+        Runs the model on anchor and positive patches.
 
-        B, M, P, C = batch.negatives.shape
+        Expected model output:
+            {
+                "weights": (B, P),
+                "vector":  (B, 2)
+            }
+        """
+        anchor_patch = batch.anchor
+        positive_patch = batch.positive
 
-        anchor = batch.anchor
-        positive = batch.positive
-        negatives = batch.negatives
+        anchor_out = self.model(anchor_patch)
+        positive_out = self.model(positive_patch)
 
-        anchor_emb = self.model(anchor)
-        positive_emb = self.model(positive)
-
-        flat_neg = negatives.view(B * M, P, C)
-        flat_emb = self.model(flat_neg)
-
-        D = flat_emb.shape[-1]
-
-        neg_emb = flat_emb.view(B, M, D)
-
-        return anchor_emb, positive_emb, neg_emb
+        return anchor_out, positive_out
 
     def train_step(self, batch):
-
         self.model.train()
-
         batch = self._move_batch(batch)
 
         self.optimizer.zero_grad()
 
-        a, p, n = self._embed(batch)
+        anchor_out, positive_out = self._forward_pair(batch)
 
-        loss, stats = self.loss_fn(a, p, n, return_stats=True)
+        v_anchor = anchor_out["vector"]            # (B,2)
+        v_positive = positive_out["vector"]        # (B,2)
+        w_anchor = anchor_out["weights"]           # (B,P)
+        B, M, P, C = batch.negatives.shape
+
+        flat_neg = batch.negatives.view(B * M, P, C)
+
+        neg_out = self.model(flat_neg)
+
+        v_neg = neg_out["vector"].view(B, M, 2)
+        loss, stats = self.loss_fn(
+            v_anchor=v_anchor,
+            v_positive=v_positive,
+            weights_anchor=w_anchor,
+            transform_matrix=batch.transform_matrix,
+            v_negatives=v_neg,
+            return_stats=True,
+        )
 
         loss.backward()
 
@@ -84,28 +97,40 @@ class TangentTrainer:
 
         self.optimizer.step()
 
-        return TrainOutput(loss=float(loss.item()), stats=stats.__dict__)
+        return TrainOutput(
+            loss=float(loss.item()),
+            stats=stats,
+        )
 
     @torch.no_grad()
     def eval_step(self, batch):
-
         self.model.eval()
-
         batch = self._move_batch(batch)
 
-        a, p, n = self._embed(batch)
+        anchor_out, positive_out = self._forward_pair(batch)
 
-        loss, stats = self.loss_fn(a, p, n, return_stats=True)
+        v_anchor = anchor_out["vector"]
+        v_positive = positive_out["vector"]
+        w_anchor = anchor_out["weights"]
 
-        return TrainOutput(loss=float(loss.item()), stats=stats.__dict__)
+        loss, stats = self.loss_fn(
+            v_anchor=v_anchor,
+            v_positive=v_positive,
+            weights_anchor=w_anchor,
+            transform_matrix=batch.transform_matrix,
+            return_stats=True,
+        )
+
+        return TrainOutput(
+            loss=float(loss.item()),
+            stats=stats,
+        )
 
     def _run_loader(self, loader, train):
-
         metrics = {}
         n = 0
 
         for batch in loader:
-
             if train:
                 out = self.train_step(batch)
             else:
@@ -128,7 +153,6 @@ class TangentTrainer:
         num_epochs,
         early_stopping_patience=10,
     ):
-
         best_val = float("inf")
         best_epoch = 0
         patience = 0
@@ -136,7 +160,6 @@ class TangentTrainer:
         best_model_path = self.checkpoint_dir / "best_model.pt"
 
         for epoch in range(1, num_epochs + 1):
-
             train_metrics = self._run_loader(train_loader, train=True)
             val_metrics = self._run_loader(val_loader, train=False)
 
@@ -147,15 +170,12 @@ class TangentTrainer:
             print("val:  ", val_metrics)
 
             if val_loss < best_val:
-
                 best_val = val_loss
                 best_epoch = epoch
                 patience = 0
 
                 torch.save(self.model.state_dict(), best_model_path)
-
                 print("✓ saved new best model")
-
             else:
                 patience += 1
 
@@ -166,11 +186,9 @@ class TangentTrainer:
         print("\nBest validation epoch:", best_epoch)
 
         self.model.load_state_dict(torch.load(best_model_path))
-
         return best_model_path
 
     def evaluate(self, loader):
-
         metrics = self._run_loader(loader, train=False)
 
         print("\nTest metrics:")

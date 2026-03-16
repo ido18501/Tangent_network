@@ -21,6 +21,7 @@ class TangentBatch:
     anchor: torch.Tensor
     positive: torch.Tensor
     negatives: torch.Tensor
+    transform_matrix: torch.Tensor
     family: list[str]
     anchor_center_index: torch.Tensor
     negative_center_indices: torch.Tensor
@@ -54,10 +55,16 @@ def tangent_collate_fn(batch: Sequence[TangentSampleTensors]) -> TangentBatch:
         dim=0,
     )
 
+    transform_matrix = torch.stack(
+        [sample.transform_matrix for sample in batch],
+        dim=0,
+    )
+
     return TangentBatch(
         anchor=anchor,
         positive=positive,
         negatives=negatives,
+        transform_matrix=transform_matrix,
         family=family,
         anchor_center_index=anchor_center_index,
         negative_center_indices=negative_center_indices,

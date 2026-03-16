@@ -27,6 +27,7 @@ class TangentSampleTensors:
     anchor: torch.Tensor
     positive: torch.Tensor
     negatives: torch.Tensor
+    transform_matrix: torch.Tensor
     family: str
     anchor_center_index: int
     negative_center_indices: torch.Tensor
@@ -185,11 +186,15 @@ class TangentDataset(Dataset):
             tuple_sample.negative_center_indices,
             dtype=torch.long,
         )
-
+        transform_matrix = torch.as_tensor(
+            tuple_sample.transform.A,
+            dtype=self.dtype,
+        )
         return TangentSampleTensors(
             anchor=anchor,
             positive=positive,
             negatives=negatives,
+            transform_matrix=transform_matrix,
             family=tuple_sample.family,
             anchor_center_index=tuple_sample.anchor_center_index,
             negative_center_indices=negative_center_indices,
