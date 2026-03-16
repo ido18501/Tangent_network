@@ -299,7 +299,146 @@ def fit_curve_to_canvas_with_random_size(
     scale_factor = target_extent / current_extent
     return points * scale_factor
 
+def chaikin_subdivide(points: Array, num_iters: int = 2, closed: bool = True) -> Array:
+    points = np.asarray(points, dtype=np.float64)
+    pts = points.copy()
 
+    for _ in range(num_iters):
+        new_pts = []
+        n = len(pts)
+        last = n if closed else n - 1
+
+        for i in range(last):
+            p = pts[i]
+            q = pts[(i + 1) % n]
+            new_pts.append(0.75 * p + 0.25 * q)
+            new_pts.append(0.25 * p + 0.75 * q)
+
+        if not closed:
+            new_pts = [pts[0]] + new_pts + [pts[-1]]
+
+        pts = np.asarray(new_pts, dtype=np.float64)
+
+    return pts
+
+
+def resample_polyline_uniform(points: Array, num_points: int, closed: bool = True) -> Array:
+    points = np.asarray(points, dtype=np.float64)
+
+    if closed:
+        pts = np.vstack([points, points[:1]])
+    else:
+        pts = points
+
+    seg = pts[1:] - pts[:-1]
+    seg_len = np.linalg.norm(seg, axis=1)
+    cum = np.concatenate([[0.0], np.cumsum(seg_len)])
+    total = cum[-1]
+
+    if total <= 1e-12:
+        raise ValueError("Degenerate polyline.")
+
+    if closed:
+        targets = np.linspace(0.0, total, num_points, endpoint=False)
+    else:
+        targets = np.linspace(0.0, total, num_points, endpoint=True)
+
+    out = []
+    j = 0
+    for t in targets:
+        while j + 1 < len(cum) and cum[j + 1] < t:
+            j += 1
+        j = min(j, len(seg_len) - 1)
+        local_len = seg_len[j]
+        alpha = 0.0 if local_len <= 1e-12 else (t - cum[j]) / local_len
+        p = (1.0 - alpha) * pts[j] + alpha * pts[j + 1]
+        out.append(p)
+
+    return np.asarray(out, dtype=np.float64)
+
+
+def generate_random_piecewise_curve(
+    num_points: int,
+    rng: np.random.Generator,
+    num_vertices_range: tuple[int, int] = (8, 14),
+    radius_range: tuple[float, float] = (0.4, 1.0),
+    angle_jitter: float = 0.35,
+    smooth_iters_range: tuple[int, int] = (1, 3),
+    closed: bool = True,
+) -> Array:
+    m = int(rng.integers(num_vertices_range[0], num_vertices_range[1] + 1))
+
+    base_angles = np.linspace(0.0, 2.0 * np.pi, m, endpoint=False)
+    angle_noise = rng.uniform(-angle_jitter, angle_jitter, size=m)
+    angles = np.sort(base_angles + angle_noise)
+
+    radii = rng.uniform(radius_range[0], radius_range[1], size=m)
+    verts = np.stack([radii * np.cos(angles), radii * np.sin(angles)], axis=1)
+
+    smooth_iters = int(rng.integers(smooth_iters_range[0], smooth_iters_range[1] + 1))
+    pts = chaikin_subdivide(verts, num_iters=smooth_iters, closed=closed)
+    pts = resample_polyline_uniform(pts, num_points=num_points, closed=closed)
+    pts = center_curve(pts)
+
+    return pts
+
+
+def warp_curve_sampling(
+    points: Array,
+    rng: np.random.Generator,
+    strength: float = 0.18,
+    closed: bool = True,
+) -> Array:
+    """
+    Reparameterization-like warp that makes point spacing non-uniform,
+    while preserving the underlying curve geometry.
+    """
+    points = np.asarray(points, dtype=np.float64)
+    n = len(points)
+
+    if closed:
+        pts = np.vstack([points, points[:1]])
+    else:
+        pts = points
+
+    seg = pts[1:] - pts[:-1]
+    seg_len = np.linalg.norm(seg, axis=1)
+    cum = np.concatenate([[0.0], np.cumsum(seg_len)])
+    total = cum[-1]
+
+    if total <= 1e-12:
+        raise ValueError("Degenerate curve in warp_curve_sampling.")
+
+    s = cum / total
+
+    phases = rng.uniform(0.0, 2.0 * np.pi, size=2)
+    warped = s + strength * (
+        0.6 * np.sin(2.0 * np.pi * s + phases[0]) +
+        0.4 * np.sin(4.0 * np.pi * s + phases[1])
+    )
+
+    warped = warped - warped.min()
+    warped = warped / max(warped.max(), 1e-12)
+    warped = np.maximum.accumulate(warped)
+
+    if closed:
+        targets = np.linspace(0.0, 1.0, n, endpoint=False)
+    else:
+        targets = np.linspace(0.0, 1.0, n, endpoint=True)
+
+    sampled = []
+    j = 0
+    for t in targets:
+        while j + 1 < len(warped) and warped[j + 1] < t:
+            j += 1
+        j = min(j, len(seg_len) - 1)
+
+        denom = warped[j + 1] - warped[j] if j + 1 < len(warped) else 0.0
+        alpha = 0.0 if denom <= 1e-12 else (t - warped[j]) / denom
+        p = (1.0 - alpha) * pts[j] + alpha * pts[j + 1]
+        sampled.append(p)
+
+    return np.asarray(sampled, dtype=np.float64)
 def generate_random_simple_fourier_curve(
     t: Array,
     max_freq: int = 5,

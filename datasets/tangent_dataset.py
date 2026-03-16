@@ -7,7 +7,16 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from utils.curve_generation import generate_random_simple_fourier_curve
+from utils.curve_generation import (
+    generate_random_simple_fourier_curve,
+    generate_random_piecewise_curve,
+    fit_curve_to_canvas_with_random_size,
+    warp_curve_sampling,
+)
+from utils.real_contours import (
+    RealContourLibrary,
+    preprocess_real_contour_for_training,
+)
 from datasets.tangent_tuple_generation import build_random_tangent_training_tuple
 
 
@@ -68,9 +77,37 @@ class TangentDataset(Dataset):
         transform_kwargs: dict[str, Any] | None = None,
         return_centered: bool = True,
         point_noise_std: float = 0.0,
+        curve_family_probs: dict[str, float] | None = None,
+        warp_sampling_prob: float = 0.7,
+        warp_sampling_strength: float = 0.18,
+        orthogonal_noise_std: float = 0.0,
+        real_curve_fraction: float = 0.0,
+        real_contours_npz_dir: str | None = None,
+        real_closed_only: bool = True,
+        real_closed_threshold: float = 1.5,
         dtype: torch.dtype = torch.float32,
         seed: int | None = None,
     ) -> None:
+        if not (0.0 <= real_curve_fraction <= 1.0):
+            raise ValueError("real_curve_fraction must be in [0, 1].")
+
+        if real_curve_fraction > 0.0 and real_contours_npz_dir is None:
+            raise ValueError(
+                "real_contours_npz_dir must be provided when real_curve_fraction > 0."
+            )
+        if not (0.0 <= warp_sampling_prob <= 1.0):
+            raise ValueError("warp_sampling_prob must be in [0, 1].")
+        if warp_sampling_strength < 0.0:
+            raise ValueError("warp_sampling_strength must be nonnegative.")
+        if orthogonal_noise_std < 0.0:
+            raise ValueError("orthogonal_noise_std must be nonnegative.")
+        if curve_family_probs is None:
+            curve_family_probs = {"fourier": 0.55, "piecewise": 0.45}
+
+        self.curve_family_probs = dict(curve_family_probs)
+        self.warp_sampling_prob = warp_sampling_prob
+        self.warp_sampling_strength = warp_sampling_strength
+        self.orthogonal_noise_std = orthogonal_noise_std
         if length < 1:
             raise ValueError("length must be at least 1.")
         if num_curve_points < 20:
@@ -91,6 +128,19 @@ class TangentDataset(Dataset):
         self.length = length
         self.family = family
 
+
+        self.real_curve_fraction = real_curve_fraction
+        self.real_contours_npz_dir = real_contours_npz_dir
+        self.real_closed_only = real_closed_only
+        self.real_closed_threshold = real_closed_threshold
+        self.real_contour_library: RealContourLibrary | None = None
+        if self.real_curve_fraction > 0.0:
+            self.real_contour_library = RealContourLibrary(
+                contour_dir=self.real_contours_npz_dir,
+                min_points=30,
+                closed_threshold=self.real_closed_threshold,
+                closed_only=self.real_closed_only,
+            )
         self.num_curve_points = num_curve_points
         self.fourier_max_freq = fourier_max_freq
         self.fourier_scale = fourier_scale
@@ -126,23 +176,112 @@ class TangentDataset(Dataset):
         if self._base_seed is None:
             return np.random.default_rng()
         return np.random.default_rng(self._base_seed + index)
+    def _sample_curve_family(self, rng: np.random.Generator) -> str:
+        names = list(self.curve_family_probs.keys())
+        probs = np.asarray([self.curve_family_probs[n] for n in names], dtype=np.float64)
+        probs = probs / probs.sum()
+        return str(rng.choice(names, p=probs))
+
+    def _add_curve_noise(self, curve_points: Array, rng: np.random.Generator) -> Array:
+        pts = np.asarray(curve_points, dtype=np.float64).copy()
+
+        if self.point_noise_std > 0.0:
+            pts += rng.normal(0.0, self.point_noise_std, size=pts.shape)
+
+        if self.orthogonal_noise_std > 0.0:
+            prev_pts = np.roll(pts, 1, axis=0)
+            next_pts = np.roll(pts, -1, axis=0)
+            tang = next_pts - prev_pts
+            tang_norm = np.linalg.norm(tang, axis=1, keepdims=True)
+            tang = tang / np.clip(tang_norm, 1e-12, None)
+            normal = np.stack([-tang[:, 1], tang[:, 0]], axis=1)
+            coeff = rng.normal(0.0, self.orthogonal_noise_std, size=(len(pts), 1))
+            pts = pts + coeff * normal
+
+        return pts
+
+    def _generate_synthetic_curve(self, rng: np.random.Generator) -> Array:
+        family = self._sample_curve_family(rng)
+
+        if family == "fourier":
+            t = np.linspace(0.0, 2.0 * np.pi, self.num_curve_points, endpoint=False)
+
+            curve_points, _ = generate_random_simple_fourier_curve(
+                t=t,
+                max_freq=self.fourier_max_freq,
+                scale=self.fourier_scale,
+                decay_power=self.fourier_decay_power,
+                rng=rng,
+                max_tries=self.curve_max_tries,
+                center=True,
+                fit_to_canvas=True,
+                min_size=self.curve_min_size,
+                max_size=self.curve_max_size,
+            )
+
+        elif family == "piecewise":
+            curve_points = generate_random_piecewise_curve(
+                num_points=self.num_curve_points,
+                rng=rng,
+                closed=self.closed,
+            )
+            curve_points = fit_curve_to_canvas_with_random_size(
+                curve_points,
+                rng=rng,
+                min_size=self.curve_min_size,
+                max_size=self.curve_max_size,
+            )
+
+        else:
+            raise ValueError(f"Unsupported sampled curve family: {family}")
+
+        if rng.random() < self.warp_sampling_prob:
+            curve_points = warp_curve_sampling(
+                curve_points,
+                rng=rng,
+                strength=self.warp_sampling_strength,
+                closed=self.closed,
+            )
+
+        curve_points = self._add_curve_noise(curve_points, rng)
+        return curve_points
+
+    def _generate_real_curve(self, rng: np.random.Generator) -> Array:
+        if self.real_contour_library is None:
+            raise RuntimeError("Real contour library is not initialized.")
+
+        raw_contour = self.real_contour_library.sample_raw_contour(rng)
+
+        curve_points = preprocess_real_contour_for_training(
+            raw_contour,
+            num_curve_points=self.num_curve_points,
+            rng=rng,
+            closed=self.closed,
+            curve_min_size=self.curve_min_size,
+            curve_max_size=self.curve_max_size,
+        )
+
+        if rng.random() < self.warp_sampling_prob:
+            curve_points = warp_curve_sampling(
+                curve_points,
+                rng=rng,
+                strength=self.warp_sampling_strength,
+                closed=self.closed,
+            )
+
+        curve_points = self._add_curve_noise(curve_points, rng)
+        return curve_points
 
     def _generate_curve(self, rng: np.random.Generator) -> Array:
-        t = np.linspace(0.0, 2.0 * np.pi, self.num_curve_points, endpoint=False)
-
-        curve_points, _ = generate_random_simple_fourier_curve(
-            t=t,
-            max_freq=self.fourier_max_freq,
-            scale=self.fourier_scale,
-            decay_power=self.fourier_decay_power,
-            rng=rng,
-            max_tries=self.curve_max_tries,
-            center=True,
-            fit_to_canvas=True,
-            min_size=self.curve_min_size,
-            max_size=self.curve_max_size,
+        use_real = (
+                self.real_contour_library is not None
+                and rng.random() < self.real_curve_fraction
         )
-        return curve_points
+
+        if use_real:
+            return self._generate_real_curve(rng)
+
+        return self._generate_synthetic_curve(rng)
 
     def _sample_half_width(self, rng: np.random.Generator) -> int:
         if self.half_width_range is None:

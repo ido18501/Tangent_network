@@ -381,4 +381,6 @@ def build_random_tangent_training_tuple(
         jitter_fraction=jitter_fraction,
         rng=rng,
         transform_kwargs=transform_kwargs,
+        external_negative_curves=external_negative_curves,
+        num_cross_curve_negatives=num_cross_curve_negatives,
     )
