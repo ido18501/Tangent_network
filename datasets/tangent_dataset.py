@@ -37,16 +37,10 @@ class TangentDataset(Dataset):
     """
     On-the-fly dataset for tangent-learning tuples.
 
-    Each sample:
-        - generates a random curve
-        - samples one anchor point
-        - builds:
-            anchor patch
-            positive patch under chosen transformation family
-            M negative patches from nearby different points
-
-    The dataset is effectively infinite in diversity; __len__ controls the
-    nominal epoch size.
+    v2:
+        - optional variable half-width
+        - optional cross-curve negatives
+        - optional mild coordinate noise
     """
 
     def __init__(
@@ -63,14 +57,17 @@ class TangentDataset(Dataset):
         curve_max_size: float = 0.75,
         patch_size: int = 9,
         half_width: int = 12,
+        half_width_range: tuple[int, int] | None = None,
         num_negatives: int = 8,
         negative_min_offset: int = 5,
         negative_max_offset: int = 25,
+        negative_other_curve_fraction: float = 0.5,
         patch_mode: str = "jittered_symmetric",
         jitter_fraction: float = 0.25,
         closed: bool = True,
         transform_kwargs: dict[str, Any] | None = None,
         return_centered: bool = True,
+        point_noise_std: float = 0.0,
         dtype: torch.dtype = torch.float32,
         seed: int | None = None,
     ) -> None:
@@ -86,6 +83,10 @@ class TangentDataset(Dataset):
             raise ValueError("num_negatives must be at least 1.")
         if negative_min_offset < 1 or negative_max_offset < negative_min_offset:
             raise ValueError("Require 1 <= negative_min_offset <= negative_max_offset.")
+        if not (0.0 <= negative_other_curve_fraction <= 1.0):
+            raise ValueError("negative_other_curve_fraction must be in [0, 1].")
+        if point_noise_std < 0.0:
+            raise ValueError("point_noise_std must be nonnegative.")
 
         self.length = length
         self.family = family
@@ -100,15 +101,20 @@ class TangentDataset(Dataset):
 
         self.patch_size = patch_size
         self.half_width = half_width
+        self.half_width_range = half_width_range
+
         self.num_negatives = num_negatives
         self.negative_min_offset = negative_min_offset
         self.negative_max_offset = negative_max_offset
+        self.negative_other_curve_fraction = negative_other_curve_fraction
+
         self.patch_mode = patch_mode
         self.jitter_fraction = jitter_fraction
         self.closed = closed
 
         self.transform_kwargs = {} if transform_kwargs is None else dict(transform_kwargs)
         self.return_centered = return_centered
+        self.point_noise_std = point_noise_std
         self.dtype = dtype
 
         self._base_seed = seed
@@ -117,12 +123,6 @@ class TangentDataset(Dataset):
         return self.length
 
     def _make_rng(self, index: int) -> np.random.Generator:
-        """
-        Make per-sample RNG.
-
-        If a base seed was given, sampling becomes reproducible across runs.
-        Otherwise each call is fresh/random.
-        """
         if self._base_seed is None:
             return np.random.default_rng()
         return np.random.default_rng(self._base_seed + index)
@@ -144,16 +144,40 @@ class TangentDataset(Dataset):
         )
         return curve_points
 
+    def _sample_half_width(self, rng: np.random.Generator) -> int:
+        if self.half_width_range is None:
+            return self.half_width
+
+        lo, hi = self.half_width_range
+        if lo < 1 or hi < lo:
+            raise ValueError("Invalid half_width_range.")
+
+        return int(rng.integers(lo, hi + 1))
+
+    def _maybe_add_noise(self, x: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+        if self.point_noise_std <= 0.0:
+            return x
+        noise = rng.normal(loc=0.0, scale=self.point_noise_std, size=x.shape)
+        return x + noise.astype(np.float64)
+
     def __getitem__(self, index: int) -> TangentSampleTensors:
         rng = self._make_rng(index)
 
         curve_points = self._generate_curve(rng)
+        current_half_width = self._sample_half_width(rng)
+
+        num_cross_curve_negatives = int(round(self.num_negatives * self.negative_other_curve_fraction))
+        num_cross_curve_negatives = min(num_cross_curve_negatives, self.num_negatives)
+
+        external_negative_curves = [
+            self._generate_curve(rng) for _ in range(num_cross_curve_negatives)
+        ]
 
         tuple_sample = build_random_tangent_training_tuple(
             curve_points=curve_points,
             family=self.family,
             patch_size=self.patch_size,
-            half_width=self.half_width,
+            half_width=current_half_width,
             num_negatives=self.num_negatives,
             negative_min_offset=self.negative_min_offset,
             negative_max_offset=self.negative_max_offset,
@@ -162,6 +186,8 @@ class TangentDataset(Dataset):
             jitter_fraction=self.jitter_fraction,
             rng=rng,
             transform_kwargs=self.transform_kwargs,
+            external_negative_curves=external_negative_curves,
+            num_cross_curve_negatives=num_cross_curve_negatives,
         )
 
         if self.return_centered:
@@ -179,6 +205,10 @@ class TangentDataset(Dataset):
                 axis=0,
             )
 
+        anchor_np = self._maybe_add_noise(anchor_np, rng)
+        positive_np = self._maybe_add_noise(positive_np, rng)
+        negatives_np = self._maybe_add_noise(negatives_np, rng)
+
         anchor = torch.as_tensor(anchor_np, dtype=self.dtype)
         positive = torch.as_tensor(positive_np, dtype=self.dtype)
         negatives = torch.as_tensor(negatives_np, dtype=self.dtype)
@@ -190,6 +220,7 @@ class TangentDataset(Dataset):
             tuple_sample.transform.A,
             dtype=self.dtype,
         )
+
         return TangentSampleTensors(
             anchor=anchor,
             positive=positive,

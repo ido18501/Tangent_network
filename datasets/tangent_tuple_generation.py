@@ -125,7 +125,38 @@ def _sample_local_negative_indices(
 
     return candidate_indices.astype(np.int64)
 
+def _sample_random_patch_from_curve(
+    curve_points: Array,
+    patch_size: int,
+    half_width: int,
+    *,
+    closed: bool,
+    patch_mode: str,
+    jitter_fraction: float,
+    rng: np.random.Generator,
+) -> CurvePatchSample:
+    num_points = len(curve_points)
 
+    if closed:
+        center_index = int(rng.integers(0, num_points))
+    else:
+        valid_center_margin = half_width
+        left = valid_center_margin
+        right = num_points - valid_center_margin
+        if left >= right:
+            raise ValueError("No valid center indices remain for external negative sampling.")
+        center_index = int(rng.integers(left, right))
+
+    return sample_patch_around_index(
+        curve_points=curve_points,
+        center_index=center_index,
+        patch_size=patch_size,
+        half_width=half_width,
+        mode=patch_mode,
+        closed=closed,
+        rng=rng,
+        jitter_fraction=jitter_fraction,
+    )
 def build_tangent_training_tuple(
     curve_points: Array,
     family: str,
@@ -141,48 +172,23 @@ def build_tangent_training_tuple(
     jitter_fraction: float = 0.25,
     rng: np.random.Generator | None = None,
     transform_kwargs: dict[str, Any] | None = None,
+    external_negative_curves: list[Array] | None = None,
+    num_cross_curve_negatives: int = 0,
 ) -> TangentTrainingTuple:
     """
     Build one training tuple for a chosen transformation family.
 
-    Version 1 design:
+    v2 design:
         - anchor    : patch at center p on original curve
         - positive  : patch at same center p on transformed curve
-        - negatives : nearby patches q != p on the same transformed curve
+        - negatives : mixture of
+            (a) same-curve local negatives on transformed curve
+            (b) random negatives from other transformed curves
 
-    This keeps the transformation family consistent across positive and negatives.
-
-    Args:
-        curve_points:
-            Dense sampled curve, shape (N, 2).
-        family:
-            Transformation family, e.g.:
-                "euclidean", "similarity", "equi_affine", "affine"
-        anchor_center_index:
-            Fixed anchor center index p.
-        patch_size:
-            Odd patch size >= 3.
-        half_width:
-            Patch neighborhood radius in index units.
-        num_negatives:
-            Number of negative patches.
-        negative_min_offset:
-            Minimum absolute offset from anchor center for negatives.
-        negative_max_offset:
-            Maximum absolute offset from anchor center for negatives.
-        closed:
-            Whether the dense curve should wrap around cyclically.
-        patch_mode:
-            Patch sampling mode.
-        jitter_fraction:
-            Jitter strength for patch sampling.
-        rng:
-            Optional NumPy random generator.
-        transform_kwargs:
-            Extra keyword arguments forwarded to sample_transformation().
-
-    Returns:
-        TangentTrainingTuple
+    Notes:
+        - positive is independently resampled on the transformed dense curve
+        - this reduces parameterization leakage
+        - cross-curve negatives diversify difficulty
     """
     rng = _ensure_rng(rng)
 
@@ -196,6 +202,13 @@ def build_tangent_training_tuple(
 
     if transform_kwargs is None:
         transform_kwargs = {}
+
+    if external_negative_curves is None:
+        external_negative_curves = []
+
+    num_cross_curve_negatives = int(num_cross_curve_negatives)
+    num_cross_curve_negatives = max(0, min(num_cross_curve_negatives, num_negatives))
+    num_same_curve_negatives = num_negatives - num_cross_curve_negatives
 
     # 1) Anchor on original curve
     anchor = sample_patch_around_index(
@@ -218,7 +231,7 @@ def build_tangent_training_tuple(
 
     transformed_curve = apply_transformation(curve_points, transform)
 
-    # 3) Positive: same center index, transformed curve
+    # 3) Positive: same center index, but independently resampled on transformed dense curve
     positive = sample_patch_around_index(
         curve_points=transformed_curve,
         center_index=anchor_center_index,
@@ -230,30 +243,78 @@ def build_tangent_training_tuple(
         jitter_fraction=jitter_fraction,
     )
 
-    # 4) Negatives: nearby but different centers on same transformed curve
-    negative_center_indices = _sample_local_negative_indices(
-        num_points=num_points,
-        anchor_center_index=anchor_center_index,
-        num_negatives=num_negatives,
-        min_offset=negative_min_offset,
-        max_offset=negative_max_offset,
-        closed=closed,
-        rng=rng,
-    )
-
     negatives: list[CurvePatchSample] = []
-    for neg_idx in negative_center_indices:
-        neg_patch = sample_patch_around_index(
-            curve_points=transformed_curve,
-            center_index=int(neg_idx),
-            patch_size=patch_size,
-            half_width=half_width,
-            mode=patch_mode,
+    negative_center_indices_parts: list[Array] = []
+
+    # 4a) Same-curve negatives on transformed curve
+    if num_same_curve_negatives > 0:
+        same_curve_negative_indices = _sample_local_negative_indices(
+            num_points=num_points,
+            anchor_center_index=anchor_center_index,
+            num_negatives=num_same_curve_negatives,
+            min_offset=negative_min_offset,
+            max_offset=negative_max_offset,
             closed=closed,
             rng=rng,
-            jitter_fraction=jitter_fraction,
         )
-        negatives.append(neg_patch)
+
+        for neg_idx in same_curve_negative_indices:
+            neg_patch = sample_patch_around_index(
+                curve_points=transformed_curve,
+                center_index=int(neg_idx),
+                patch_size=patch_size,
+                half_width=half_width,
+                mode=patch_mode,
+                closed=closed,
+                rng=rng,
+                jitter_fraction=jitter_fraction,
+            )
+            negatives.append(neg_patch)
+
+        negative_center_indices_parts.append(same_curve_negative_indices.astype(np.int64))
+
+    # 4b) Cross-curve negatives
+    if num_cross_curve_negatives > 0:
+        if len(external_negative_curves) < num_cross_curve_negatives:
+            raise ValueError(
+                "Need at least num_cross_curve_negatives external curves, "
+                f"got {len(external_negative_curves)}."
+            )
+
+        external_indices = rng.choice(
+            len(external_negative_curves),
+            size=num_cross_curve_negatives,
+            replace=False,
+        )
+
+        cross_curve_center_indices = np.full(num_cross_curve_negatives, -1, dtype=np.int64)
+
+        for ext_idx in external_indices:
+            ext_curve = np.asarray(external_negative_curves[int(ext_idx)], dtype=np.float64)
+            if ext_curve.ndim != 2 or ext_curve.shape[1] != 2:
+                raise ValueError("Each external negative curve must have shape (N, 2).")
+
+            transformed_ext_curve = apply_transformation(ext_curve, transform)
+
+            neg_patch = _sample_random_patch_from_curve(
+                curve_points=transformed_ext_curve,
+                patch_size=patch_size,
+                half_width=half_width,
+                closed=closed,
+                patch_mode=patch_mode,
+                jitter_fraction=jitter_fraction,
+                rng=rng,
+            )
+            negatives.append(neg_patch)
+
+        negative_center_indices_parts.append(cross_curve_center_indices)
+
+    if len(negatives) != num_negatives:
+        raise RuntimeError(
+            f"Expected {num_negatives} negatives, got {len(negatives)}."
+        )
+
+    negative_center_indices = np.concatenate(negative_center_indices_parts, axis=0)
 
     return TangentTrainingTuple(
         family=family,
