@@ -342,6 +342,8 @@ def build_random_tangent_training_tuple(
     rng: np.random.Generator | None = None,
     transform_kwargs: dict[str, Any] | None = None,
     valid_center_margin: int | None = None,
+    external_negative_curves: list[Array] | None = None,
+    num_cross_curve_negatives: int = 0,
 ) -> TangentTrainingTuple:
     """
     Same as build_tangent_training_tuple(), but chooses the anchor center randomly.
