@@ -39,10 +39,8 @@ class TangentTrainer:
     def _move_batch(self, batch: TangentBatch):
         batch.anchor = batch.anchor.to(self.device)
         batch.positive = batch.positive.to(self.device)
-
-        # new: we need the linear transform matrix A
+        batch.negatives = batch.negatives.to(self.device)
         batch.transform_matrix = batch.transform_matrix.to(self.device)
-
         return batch
 
     def _forward_pair(self, batch: TangentBatch):
@@ -71,16 +69,15 @@ class TangentTrainer:
 
         anchor_out, positive_out = self._forward_pair(batch)
 
-        v_anchor = anchor_out["vector"]            # (B,2)
-        v_positive = positive_out["vector"]        # (B,2)
-        w_anchor = anchor_out["weights"]           # (B,P)
+        v_anchor = anchor_out["vector"]
+        v_positive = positive_out["vector"]
+        w_anchor = anchor_out["weights"]
+
         B, M, P, C = batch.negatives.shape
-
         flat_neg = batch.negatives.view(B * M, P, C)
-
         neg_out = self.model(flat_neg)
-
         v_neg = neg_out["vector"].view(B, M, 2)
+
         loss, stats = self.loss_fn(
             v_anchor=v_anchor,
             v_positive=v_positive,
@@ -113,11 +110,17 @@ class TangentTrainer:
         v_positive = positive_out["vector"]
         w_anchor = anchor_out["weights"]
 
+        B, M, P, C = batch.negatives.shape
+        flat_neg = batch.negatives.view(B * M, P, C)
+        neg_out = self.model(flat_neg)
+        v_neg = neg_out["vector"].view(B, M, 2)
+
         loss, stats = self.loss_fn(
             v_anchor=v_anchor,
             v_positive=v_positive,
             weights_anchor=w_anchor,
             transform_matrix=batch.transform_matrix,
+            v_negatives=v_neg,
             return_stats=True,
         )
 

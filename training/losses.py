@@ -233,17 +233,17 @@ class TripletMarginLossWithHardNegatives(nn.Module):
 
 
 
+
 class OperatorEquivarianceLoss(nn.Module):
 
     def __init__(
         self,
         lambda_reg: float = 1e-4,
-        lambda_neg: float = 0.1,
+        lambda_neg: float = 0.5,
         neg_margin: float = 0.3,
         eps: float = 1e-12,
     ):
         super().__init__()
-
         self.lambda_reg = lambda_reg
         self.lambda_neg = lambda_neg
         self.neg_margin = neg_margin
@@ -251,56 +251,37 @@ class OperatorEquivarianceLoss(nn.Module):
 
     def forward(
         self,
-        v_anchor,
-        v_positive,
-        weights_anchor,
-        transform_matrix,
-        v_negatives=None,
-        return_stats=False,
+        v_anchor: torch.Tensor,
+        v_positive: torch.Tensor,
+        weights_anchor: torch.Tensor,
+        transform_matrix: torch.Tensor,
+        v_negatives: torch.Tensor | None = None,
+        return_stats: bool = False,
     ):
-        # ---------------------------
-        # equivariance
-        # ---------------------------
-
+        # positive equivariance term
         target = torch.einsum("bij,bj->bi", transform_matrix, v_anchor)
-
         target = F.normalize(target, dim=-1, eps=self.eps)
         v_positive = F.normalize(v_positive, dim=-1, eps=self.eps)
 
         cosine_pos = torch.sum(target * v_positive, dim=-1)
+        equiv_loss = 1.0 - cosine_pos.mean()
 
-        equiv_loss = 1 - cosine_pos.mean()
-
-        # ---------------------------
-        # weight regularization
-        # ---------------------------
-
+        # regularize weights
         reg_loss = weights_anchor.pow(2).mean()
 
-        # ---------------------------
-        # negatives (optional)
-        # ---------------------------
-
+        # optional negative term
         neg_loss = torch.tensor(0.0, device=v_anchor.device)
+        neg_alignment = torch.tensor(0.0, device=v_anchor.device)
 
         if v_negatives is not None:
-
             v_anchor_n = F.normalize(v_anchor, dim=-1, eps=self.eps)
-            v_neg = F.normalize(v_negatives, dim=-1, eps=self.eps)
+            v_neg_n = F.normalize(v_negatives, dim=-1, eps=self.eps)
 
-            cosine_neg = torch.einsum("bd,bmd->bm", v_anchor_n, v_neg)
-
+            cosine_neg = torch.einsum("bd,bmd->bm", v_anchor_n, v_neg_n)
+            neg_alignment = cosine_neg.mean()
             neg_loss = F.relu(cosine_neg - self.neg_margin).mean()
 
-        # ---------------------------
-        # total loss
-        # ---------------------------
-
-        loss = (
-            equiv_loss
-            + self.lambda_reg * reg_loss
-            + self.lambda_neg * neg_loss
-        )
+        loss = equiv_loss + self.lambda_reg * reg_loss + self.lambda_neg * neg_loss
 
         if not return_stats:
             return loss
@@ -311,6 +292,9 @@ class OperatorEquivarianceLoss(nn.Module):
             "reg_loss": float(reg_loss.detach().item()),
             "neg_loss": float(neg_loss.detach().item()),
             "pos_alignment": float(cosine_pos.mean().detach().item()),
+            "neg_alignment": float(neg_alignment.detach().item()),
+            "anchor_vector_norm_mean": float(v_anchor.norm(dim=-1).mean().detach().item()),
+            "positive_vector_norm_mean": float(v_positive.norm(dim=-1).mean().detach().item()),
         }
 
         return loss, stats
