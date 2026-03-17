@@ -1,0 +1,24 @@
+================================================================================
+first_derivative__synthetic_fourier
+count: 3
+mean angle error: 177.0749
+mean transformed angle error: 176.4821
+mean equivariance angle error: 0.9609
+mean cosine with ref: -0.9967
+mean transformed cosine with ref: -0.9961
+================================================================================
+first_derivative__synthetic_piecewise
+count: 3
+mean angle error: 164.5406
+mean transformed angle error: 164.4626
+mean equivariance angle error: 0.1432
+mean cosine with ref: -0.9381
+mean transformed cosine with ref: -0.9374
+================================================================================
+first_derivative__real
+count: 6
+mean angle error: 145.6380
+mean transformed angle error: 143.4101
+mean equivariance angle error: 3.1309
+mean cosine with ref: -0.7324
+mean transformed cosine with ref: -0.7167
