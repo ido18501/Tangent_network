@@ -73,9 +73,21 @@ def main() -> None:
     parser.add_argument("--blur_kernel_size", type=int, default=5)
     parser.add_argument("--canny_low", type=int, default=80)
     parser.add_argument("--canny_high", type=int, default=160)
-    parser.add_argument("--min_contour_points", type=int, default=30)
-    parser.add_argument("--min_arc_length", type=float, default=40.0)
-    parser.add_argument("--polygon_epsilon_frac", type=float, default=0.0)
+
+    parser.add_argument("--min_contour_points", type=int, default=40)
+    parser.add_argument("--min_arc_length", type=float, default=60.0)
+    parser.add_argument("--polygon_epsilon_frac", type=float, default=0.002)
+
+    parser.add_argument("--min_bbox_width", type=float, default=12.0)
+    parser.add_argument("--min_bbox_height", type=float, default=12.0)
+    parser.add_argument("--remove_border_touching", action="store_true")
+    parser.add_argument("--border_margin", type=int, default=2)
+
+    parser.add_argument("--max_mean_turn_angle_deg", type=float, default=35.0)
+    parser.add_argument("--max_sharp_turn_fraction", type=float, default=0.35)
+    parser.add_argument("--sharp_turn_threshold_deg", type=float, default=60.0)
+
+    parser.add_argument("--max_contours_per_image", type=int, default=40)
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -96,6 +108,14 @@ def main() -> None:
         min_contour_points=args.min_contour_points,
         min_arc_length=args.min_arc_length,
         polygon_epsilon_frac=args.polygon_epsilon_frac,
+        min_bbox_width=args.min_bbox_width,
+        min_bbox_height=args.min_bbox_height,
+        remove_border_touching=args.remove_border_touching,
+        border_margin=args.border_margin,
+        max_mean_turn_angle_deg=args.max_mean_turn_angle_deg,
+        max_sharp_turn_fraction=args.max_sharp_turn_fraction,
+        sharp_turn_threshold_deg=args.sharp_turn_threshold_deg,
+        max_contours_per_image=args.max_contours_per_image,
     )
 
     print(f"Found {len(image_files)} image(s) in {input_dir}")
