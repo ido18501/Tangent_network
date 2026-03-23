@@ -317,7 +317,7 @@ def build_tangent_training_tuple(
     negative_center_indices = np.concatenate(negative_center_indices_parts, axis=0)
 
     return TangentTrainingTuple(
-        family=family,
+        family=transform_family,
         anchor=anchor,
         positive=positive,
         negatives=negatives,

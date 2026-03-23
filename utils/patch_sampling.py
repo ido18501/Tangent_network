@@ -331,7 +331,7 @@ def sample_random_patch(
     curve_points: Array,
     patch_size: int,
     half_width: int,
-    mode: PatchSamplingMode = "jittered_symmetric",
+    mode: PatchSamplingMode = "random_warp_symmetric",
     closed: bool = True,
     rng: np.random.Generator | None = None,
     jitter_fraction: float = 0.25,
