@@ -46,21 +46,21 @@ def process_image_to_samples(
     return samples
 
 
-def save_samples_npz(samples: list[RealCurveSample], output_path: str | Path) -> None:
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+def save_samples_npz(samples, out_path):
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    payload: dict[str, object] = {
-        "num_curves": np.int32(len(samples)),
+    payload = {
+        "num_curves": np.array([len(samples)], dtype=np.int32),
     }
-    for i, sample in enumerate(samples):
-        payload[f"curve_{i}"] = sample.dense_curve.astype(np.float32)
-        payload[f"image_curve_{i}"] = sample.image_curve.astype(np.float32)
-        payload[f"closed_{i}"] = np.bool_(sample.closed)
-        payload[f"score_{i}"] = np.float32(sample.score)
-        payload[f"metadata_{i}"] = np.array(sample.metadata, dtype=object)
-        payload[f"image_id_{i}"] = np.array(sample.image_id)
-    np.savez_compressed(output_path, **payload)
+
+    for i, s in enumerate(samples):
+        payload[f"curve_{i}_dense"] = np.asarray(s.dense_curve, dtype=np.float32)
+        payload[f"curve_{i}_image"] = np.asarray(s.image_curve, dtype=np.float32)
+        payload[f"curve_{i}_closed"] = np.array([int(bool(s.closed))], dtype=np.uint8)
+        payload[f"curve_{i}_score"] = np.array([float(s.score)], dtype=np.float32)
+
+    np.savez_compressed(out_path, **payload)
 
 
 def load_samples_npz(path: str | Path) -> list[RealCurveSample]:

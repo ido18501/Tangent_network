@@ -319,17 +319,17 @@ class TangentOperatorModel(nn.Module):
 
         patch_feature = torch.cat([mean_feat, max_feat], dim=-1)
 
-        raw_weights = self.operator_head(patch_feature)  # (B,P)
+        raw_weights = self.operator_head(patch_feature)  # (B, P)
 
-        # enforce derivative property: sum weights = 0
-        weights = raw_weights - raw_weights.mean(dim=-1, keepdim=True)
+        # no zero-sum enforcement for now
+        weights = raw_weights
 
         # compute predicted vector
         predicted_vec = torch.einsum("bp,bpd->bd", weights, x)
 
-        predicted_vec = F.normalize(predicted_vec, dim=-1, eps=self.eps)
-
+        # no output normalization for now
         return {
+            "raw_weights": raw_weights,
             "weights": weights,
-            "vector": predicted_vec
+            "vector": predicted_vec,
         }

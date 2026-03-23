@@ -7,8 +7,55 @@ import numpy as np
 
 
 Array = np.ndarray
-PatchSamplingMode = Literal["uniform_symmetric", "jittered_symmetric"]
+PatchSamplingMode = Literal["uniform_symmetric", "random_warp_symmetric"]
 
+def _sample_random_monotone_profile(
+    x: Array,
+    rng: np.random.Generator,
+    warp_strength: float = 0.35,
+    num_harmonics: int = 3,
+) -> Array:
+    """
+    Sample a random monotone map on [-1, 1] by building a positive derivative
+    profile and integrating it.
+
+    Input:
+        x: sorted coordinates in [-1, 1]
+
+    Output:
+        warped_x: sorted coordinates in [-1, 1], strictly increasing
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if x.ndim != 1:
+        raise ValueError("x must be 1D.")
+    if len(x) < 2:
+        return x.copy()
+
+    # Build positive derivative profile g(x) > 0
+    g = np.ones_like(x, dtype=np.float64)
+
+    for k in range(1, num_harmonics + 1):
+        a = rng.normal(0.0, warp_strength / (k ** 1.5))
+        b = rng.normal(0.0, warp_strength / (k ** 1.5))
+        g += a * np.sin(k * np.pi * x) + b * np.cos(k * np.pi * x)
+
+    # Make derivative strictly positive
+    g = np.maximum(g, 1e-3)
+
+    # Integrate numerically
+    dx = np.diff(x)
+    avg_g = 0.5 * (g[:-1] + g[1:])
+    y = np.concatenate([[0.0], np.cumsum(avg_g * dx)])
+
+    # Normalize back to [-1, 1]
+    y = y - y[0]
+    total = y[-1]
+    if total <= 1e-12:
+        return x.copy()
+
+    y = y / total
+    y = 2.0 * y - 1.0
+    return y
 
 @dataclass
 class CurvePatchSample:
@@ -98,65 +145,87 @@ def _make_uniform_symmetric_offsets(
     ).astype(np.int64)
 
 
-def _make_jittered_symmetric_offsets(
+def _make_random_warp_symmetric_offsets(
     half_width: int,
     patch_size: int,
     rng: np.random.Generator,
-    jitter_fraction: float = 0.25,
+    warp_strength: float = 0.35,
+    num_harmonics: int = 3,
+    max_tries: int = 20,
 ) -> Array:
     """
-    Start from a symmetric grid and jitter non-center offsets, while preserving:
-    - sorted order
-    - unique integer offsets
-    - inclusion of 0
-    - locality
+    Sample symmetric-looking local offsets by drawing a fresh random monotone
+    warp each time.
 
-    jitter_fraction is relative to the nominal spacing.
+    The center point is always 0. Left/right spacing is allowed to vary
+    irregularly, but offsets remain ordered, unique, local, and include 0.
     """
-    base = np.linspace(-half_width, half_width, patch_size, endpoint=True)
-    offsets = base.copy()
+    if patch_size < 3 or patch_size % 2 == 0:
+        raise ValueError("patch_size must be odd and >= 3.")
 
-    if patch_size == 3:
-        # easiest stable case
-        offsets = np.array([-half_width, 0.0, half_width], dtype=np.float64)
-    else:
-        nominal_spacing = (2.0 * half_width) / (patch_size - 1)
-        jitter_mag = jitter_fraction * nominal_spacing
+    if half_width < patch_size // 2:
+        # not enough room for distinct ordered offsets
+        return _make_uniform_symmetric_offsets(
+            half_width=half_width,
+            patch_size=patch_size,
+        )
 
-        center_pos = patch_size // 2
-        for i in range(patch_size):
-            if i == center_pos:
+    base = np.linspace(-1.0, 1.0, patch_size, endpoint=True)
+    center_pos = patch_size // 2
+
+    for _ in range(max_tries):
+        warped = _sample_random_monotone_profile(
+            base,
+            rng=rng,
+            warp_strength=warp_strength,
+            num_harmonics=num_harmonics,
+        )
+
+        # Force exact center to map to 0, preserve monotonicity by shifting sides
+        warped[center_pos] = 0.0
+
+        # Rescale each side independently to fill [-1,0] and [0,1]
+        left = warped[:center_pos]
+        right = warped[center_pos + 1:]
+
+        if len(left) > 0:
+            left_min = left.min()
+            if abs(left_min) < 1e-12:
                 continue
-            offsets[i] += rng.uniform(-jitter_mag, jitter_mag)
+            left = left / abs(left_min)
+            left = np.clip(left, -1.0, -1e-6)
 
-    offsets[patch_size // 2] = 0.0
-    offsets = np.clip(offsets, -half_width, half_width)
-    offsets.sort()
-    offsets[patch_size // 2] = 0.0
-    offsets.sort()
+        if len(right) > 0:
+            right_max = right.max()
+            if abs(right_max) < 1e-12:
+                continue
+            right = right / abs(right_max)
+            right = np.clip(right, 1e-6, 1.0)
 
-    int_offsets = np.rint(offsets).astype(np.int64)
+        warped = np.concatenate([left, np.array([0.0]), right])
 
-    # enforce uniqueness and order in a simple robust way
-    int_offsets[patch_size // 2] = 0
+        offsets = warped * float(half_width)
+        int_offsets = np.rint(offsets).astype(np.int64)
+        int_offsets[center_pos] = 0
 
-    # left side strictly increasing and < 0
-    for i in range(patch_size // 2 - 1, -1, -1):
-        max_allowed = -1 if i == patch_size // 2 - 1 else int_offsets[i + 1] - 1
-        int_offsets[i] = min(int_offsets[i], max_allowed)
+        # Enforce strict order and sign
+        for i in range(center_pos - 1, -1, -1):
+            max_allowed = -1 if i == center_pos - 1 else int_offsets[i + 1] - 1
+            int_offsets[i] = min(int_offsets[i], max_allowed)
 
-    # right side strictly increasing and > 0
-    for i in range(patch_size // 2 + 1, patch_size):
-        min_allowed = 1 if i == patch_size // 2 + 1 else int_offsets[i - 1] + 1
-        int_offsets[i] = max(int_offsets[i], min_allowed)
+        for i in range(center_pos + 1, patch_size):
+            min_allowed = 1 if i == center_pos + 1 else int_offsets[i - 1] + 1
+            int_offsets[i] = max(int_offsets[i], min_allowed)
 
-    int_offsets = np.clip(int_offsets, -half_width, half_width)
+        int_offsets = np.clip(int_offsets, -half_width, half_width)
 
-    # If clipping caused collisions near boundaries, fall back to uniform.
-    if len(np.unique(int_offsets)) != patch_size or 0 not in int_offsets:
-        return _make_uniform_symmetric_offsets(half_width=half_width, patch_size=patch_size)
+        if len(np.unique(int_offsets)) == patch_size and 0 in int_offsets:
+            return int_offsets
 
-    return int_offsets
+    return _make_uniform_symmetric_offsets(
+        half_width=half_width,
+        patch_size=patch_size,
+    )
 
 
 def sample_patch_around_index(
@@ -164,7 +233,7 @@ def sample_patch_around_index(
     center_index: int,
     patch_size: int,
     half_width: int,
-    mode: PatchSamplingMode = "jittered_symmetric",
+    mode: PatchSamplingMode = "random_warp_symmetric",
     closed: bool = True,
     rng: np.random.Generator | None = None,
     jitter_fraction: float = 0.25,
@@ -226,12 +295,12 @@ def sample_patch_around_index(
             half_width=half_width,
             patch_size=patch_size,
         )
-    elif mode == "jittered_symmetric":
-        relative_offsets = _make_jittered_symmetric_offsets(
+    elif mode == "random_warp_symmetric":
+        relative_offsets = _make_random_warp_symmetric_offsets(
             half_width=half_width,
             patch_size=patch_size,
             rng=rng,
-            jitter_fraction=jitter_fraction,
+            warp_strength=jitter_fraction,
         )
     else:
         raise ValueError(f"Unsupported mode: {mode}")
