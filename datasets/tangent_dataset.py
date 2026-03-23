@@ -314,7 +314,7 @@ class TangentDataset(Dataset):
 
         tuple_sample = build_random_tangent_training_tuple(
             curve_points=curve_points,
-            family=self.family,
+            transform_family=self.family,
             patch_size=self.patch_size,
             half_width=current_half_width,
             num_negatives=self.num_negatives,

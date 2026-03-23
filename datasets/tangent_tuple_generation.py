@@ -159,7 +159,7 @@ def _sample_random_patch_from_curve(
     )
 def build_tangent_training_tuple(
     curve_points: Array,
-    family: str,
+    transform_family: str,
     anchor_center_index: int,
     patch_size: int,
     half_width: int,
@@ -224,7 +224,7 @@ def build_tangent_training_tuple(
 
     # 2) Sample transformation from requested family
     transform = sample_transformation(
-        family=family,
+        family=transform_family,
         rng=rng,
         **transform_kwargs,
     )
@@ -329,7 +329,7 @@ def build_tangent_training_tuple(
 
 def build_random_tangent_training_tuple(
     curve_points: Array,
-    family: str,
+    transform_family: str,
     patch_size: int,
     half_width: int,
     num_negatives: int,
@@ -369,7 +369,7 @@ def build_random_tangent_training_tuple(
 
     return build_tangent_training_tuple(
         curve_points=curve_points,
-        family=family,
+        transform_family=transform_family,
         anchor_center_index=anchor_center_index,
         patch_size=patch_size,
         half_width=half_width,
