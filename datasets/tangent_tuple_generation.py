@@ -68,7 +68,7 @@ def build_tangent_training_tuple(
     if transform_kwargs is None:
         transform_kwargs = {}
 
-    anchor_patch, _ = sample_patch_around_index(
+    anchor_patch = sample_patch_around_index(
         curve_points=curve_points,
         center_index=anchor_center_index,
         patch_size=patch_size,
@@ -77,7 +77,6 @@ def build_tangent_training_tuple(
         closed=closed,
         rng=rng,
         jitter_fraction=jitter_fraction,
-        return_indices=True,
     )
 
     transform = sample_transformation(
@@ -109,7 +108,6 @@ def build_tangent_training_tuple(
             closed=closed,
             rng=rng,
             jitter_fraction=jitter_fraction,
-            return_indices=False,
         )
         negative_patches.append(neg_patch)
 
@@ -127,7 +125,6 @@ def build_tangent_training_tuple(
                 closed=closed,
                 rng=rng,
                 jitter_fraction=jitter_fraction,
-                return_indices=False,
             )
             negative_patches.append(neg_patch)
 
