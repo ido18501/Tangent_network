@@ -1,293 +1,89 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _check_2d(name: str, x: torch.Tensor) -> None:
-    if x.ndim != 2:
-        raise ValueError(f"{name} must have shape (B, D), got {tuple(x.shape)}.")
-
-
-def _check_3d(name: str, x: torch.Tensor) -> None:
-    if x.ndim != 3:
-        raise ValueError(f"{name} must have shape (B, M, D), got {tuple(x.shape)}.")
-
-
-def _normalize_embeddings(x: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-    return F.normalize(x, p=2, dim=-1, eps=eps)
-
-
-@dataclass
-class InfoNCEStats:
-    loss: float
-    positive_similarity_mean: float
-    negative_similarity_mean: float
-    logits_mean: float
-
-
-class TupleInfoNCELoss(nn.Module):
-    """
-    InfoNCE loss for tuple data of the form:
-
-        anchor    : (B, D)
-        positive  : (B, D)
-        negatives : (B, M, D)
-
-    where:
-        B = batch size
-        M = number of explicit negatives per anchor
-        D = embedding dimension
-
-    For each anchor i:
-        positive logit  = sim(a_i, p_i) / tau
-        negative logits = sim(a_i, n_i,j) / tau
-
-    Optional in-batch negatives:
-        all other positives p_k, k != i, are also treated as negatives.
-
-    This is a very good default for your current pipeline.
-    """
-
-    def __init__(
-        self,
-        temperature: float = 0.07,
-        normalize: bool = True,
-        use_in_batch_negatives: bool = True,
-    ) -> None:
-        super().__init__()
-
-        if temperature <= 0:
-            raise ValueError("temperature must be positive.")
-
-        self.temperature = temperature
-        self.normalize = normalize
-        self.use_in_batch_negatives = use_in_batch_negatives
-
-    def forward(
-        self,
-        anchor: torch.Tensor,
-        positive: torch.Tensor,
-        negatives: torch.Tensor,
-        return_stats: bool = False,
-    ):
-        """
-        Args:
-            anchor:
-                Tensor of shape (B, D)
-            positive:
-                Tensor of shape (B, D)
-            negatives:
-                Tensor of shape (B, M, D)
-            return_stats:
-                If True, also returns a small stats object.
-
-        Returns:
-            loss
-            or (loss, stats)
-        """
-        _check_2d("anchor", anchor)
-        _check_2d("positive", positive)
-        _check_3d("negatives", negatives)
-
-        if anchor.shape != positive.shape:
-            raise ValueError(
-                f"anchor and positive must have same shape, got "
-                f"{tuple(anchor.shape)} and {tuple(positive.shape)}."
-            )
-
-        if anchor.shape[0] != negatives.shape[0]:
-            raise ValueError(
-                "Batch size mismatch between anchor and negatives: "
-                f"{anchor.shape[0]} vs {negatives.shape[0]}."
-            )
-
-        if anchor.shape[1] != negatives.shape[2]:
-            raise ValueError(
-                "Embedding dimension mismatch: "
-                f"anchor has D={anchor.shape[1]}, negatives have D={negatives.shape[2]}."
-            )
-
-        if self.normalize:
-            anchor = _normalize_embeddings(anchor)
-            positive = _normalize_embeddings(positive)
-            negatives = _normalize_embeddings(negatives)
-
-        # Positive logits: (B, 1)
-        pos_logits = torch.sum(anchor * positive, dim=-1, keepdim=True) / self.temperature
-
-        # Explicit negative logits: (B, M)
-        neg_logits = torch.einsum("bd,bmd->bm", anchor, negatives) / self.temperature
-
-        logits_parts = [pos_logits, neg_logits]
-
-        # Optional in-batch negatives from other positives
-        if self.use_in_batch_negatives:
-            batch_logits = torch.matmul(anchor, positive.t()) / self.temperature  # (B, B)
-
-            # Remove diagonal because p_i is the positive for a_i and already included.
-            B = anchor.shape[0]
-            mask = ~torch.eye(B, dtype=torch.bool, device=batch_logits.device)
-            in_batch_neg_logits = batch_logits[mask].view(B, B - 1)  # (B, B-1)
-
-            logits_parts.append(in_batch_neg_logits)
-
-        logits = torch.cat(logits_parts, dim=1)  # (B, 1 + M [+ B-1])
-
-        # Positive is always at class index 0
-        targets = torch.zeros(anchor.shape[0], dtype=torch.long, device=anchor.device)
-
-        loss = F.cross_entropy(logits, targets)
-
-        if not return_stats:
-            return loss
-
-        with torch.no_grad():
-            stats = InfoNCEStats(
-                loss=float(loss.detach().item()),
-                positive_similarity_mean=float(torch.sum(anchor * positive, dim=-1).mean().item()),
-                negative_similarity_mean=float(
-                    torch.einsum("bd,bmd->bm", anchor, negatives).mean().item()
-                ),
-                logits_mean=float(logits.mean().item()),
-            )
-
-        return loss, stats
-
-
-class TripletMarginLossWithHardNegatives(nn.Module):
-    """
-    Simple triplet-style baseline using the hardest explicit negative per anchor.
-
-    Inputs:
-        anchor    : (B, D)
-        positive  : (B, D)
-        negatives : (B, M, D)
-
-    This is useful as a baseline, but InfoNCE is usually the better default.
-    """
-
-    def __init__(
-        self,
-        margin: float = 0.2,
-        normalize: bool = True,
-        distance: str = "cosine",
-    ) -> None:
-        super().__init__()
-
-        if margin <= 0:
-            raise ValueError("margin must be positive.")
-        if distance not in {"cosine", "euclidean"}:
-            raise ValueError("distance must be either 'cosine' or 'euclidean'.")
-
-        self.margin = margin
-        self.normalize = normalize
-        self.distance = distance
-
-    def _pair_distance(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        if self.distance == "cosine":
-            sim = torch.sum(x * y, dim=-1)
-            return 1.0 - sim
-        return torch.norm(x - y, dim=-1, p=2)
-
-    def forward(
-        self,
-        anchor: torch.Tensor,
-        positive: torch.Tensor,
-        negatives: torch.Tensor,
-    ) -> torch.Tensor:
-        _check_2d("anchor", anchor)
-        _check_2d("positive", positive)
-        _check_3d("negatives", negatives)
-
-        if anchor.shape != positive.shape:
-            raise ValueError("anchor and positive must have the same shape.")
-        if anchor.shape[0] != negatives.shape[0]:
-            raise ValueError("Batch size mismatch between anchor and negatives.")
-        if anchor.shape[1] != negatives.shape[2]:
-            raise ValueError("Embedding dimension mismatch.")
-
-        if self.normalize:
-            anchor = _normalize_embeddings(anchor)
-            positive = _normalize_embeddings(positive)
-            negatives = _normalize_embeddings(negatives)
-
-        pos_dist = self._pair_distance(anchor, positive)  # (B,)
-
-        # Distance from each anchor to its negatives: (B, M)
-        if self.distance == "cosine":
-            neg_sim = torch.einsum("bd,bmd->bm", anchor, negatives)
-            neg_dist = 1.0 - neg_sim
-        else:
-            neg_dist = torch.norm(anchor.unsqueeze(1) - negatives, dim=-1, p=2)
-
-        hardest_neg_dist = torch.min(neg_dist, dim=1).values  # (B,)
-
-        loss = F.relu(pos_dist - hardest_neg_dist + self.margin).mean()
-        return loss
-
-
-
-
-
-
-class OperatorEquivarianceLoss(nn.Module):
+class OperatorEuclideanDerivativeLoss(nn.Module):
     def __init__(
         self,
         lambda_reg: float = 1e-4,
         lambda_neg: float = 0.1,
         neg_margin: float = 0.05,
-    ):
+        lambda_first: float = 1.0,
+        lambda_second: float = 1.0,
+        lambda_equiv_first: float = 1.0,
+        lambda_equiv_second: float = 1.0,
+    ) -> None:
         super().__init__()
         self.lambda_reg = lambda_reg
         self.lambda_neg = lambda_neg
         self.neg_margin = neg_margin
+        self.lambda_first = lambda_first
+        self.lambda_second = lambda_second
+        self.lambda_equiv_first = lambda_equiv_first
+        self.lambda_equiv_second = lambda_equiv_second
 
     def forward(
         self,
-        v_anchor: torch.Tensor,
-        v_positive: torch.Tensor,
-        weights_anchor: torch.Tensor,
+        *,
+        v_first_anchor: torch.Tensor,
+        v_first_positive: torch.Tensor,
+        v_second_anchor: torch.Tensor,
+        v_second_positive: torch.Tensor,
+        weights_first_anchor: torch.Tensor,
+        weights_second_anchor: torch.Tensor,
         transform_matrix: torch.Tensor,
-        v_negatives: torch.Tensor | None = None,
+        gt_first_anchor: torch.Tensor,
+        gt_second_anchor: torch.Tensor,
+        v_first_negatives: torch.Tensor | None = None,
         return_stats: bool = False,
     ):
-        # Raw affine-equivariant target
-        target = torch.einsum("bij,bj->bi", transform_matrix, v_anchor)
+        target_first = torch.einsum("bij,bj->bi", transform_matrix, v_first_anchor)
+        target_second = torch.einsum("bij,bj->bi", transform_matrix, v_second_anchor)
 
-        # Positive term: raw vector MSE
-        equiv_loss = F.mse_loss(v_positive, target)
+        equiv_first_loss = F.mse_loss(v_first_positive, target_first)
+        equiv_second_loss = F.mse_loss(v_second_positive, target_second)
+        first_loss = F.mse_loss(v_first_anchor, gt_first_anchor)
+        second_loss = F.mse_loss(v_second_anchor, gt_second_anchor)
 
-        # Small regularization on weights
-        reg_loss = weights_anchor.pow(2).mean()
+        reg_loss = weights_first_anchor.pow(2).mean()
 
-        neg_loss = torch.tensor(0.0, device=v_anchor.device, dtype=v_anchor.dtype)
-
-        if v_negatives is not None and self.lambda_neg > 0.0:
-            # v_negatives: (B, K, D)
-            diff_neg = v_negatives - target.unsqueeze(1)      # (B, K, D)
-            neg_dist_sq = (diff_neg ** 2).sum(dim=-1)         # (B, K)
+        neg_loss = torch.tensor(0.0, device=v_first_anchor.device, dtype=v_first_anchor.dtype)
+        if v_first_negatives is not None and self.lambda_neg > 0.0:
+            diff_neg = v_first_negatives - target_first.unsqueeze(1)
+            neg_dist_sq = (diff_neg ** 2).sum(dim=-1)
             neg_loss = F.relu(self.neg_margin - neg_dist_sq).mean()
 
-        loss = equiv_loss + self.lambda_neg * neg_loss + self.lambda_reg * reg_loss
+        loss = (
+            self.lambda_equiv_first * equiv_first_loss
+            + self.lambda_equiv_second * equiv_second_loss
+            + self.lambda_first * first_loss
+            + self.lambda_second * second_loss
+            + self.lambda_neg * neg_loss
+            + self.lambda_reg * reg_loss
+        )
 
         if not return_stats:
             return loss
 
         with torch.no_grad():
-            diff = v_positive - target
             stats = {
                 "loss": float(loss.detach().item()),
-                "equiv_loss": float(equiv_loss.detach().item()),
+                "equiv_first_loss": float(equiv_first_loss.detach().item()),
+                "equiv_second_loss": float(equiv_second_loss.detach().item()),
+                "first_loss": float(first_loss.detach().item()),
+                "second_loss": float(second_loss.detach().item()),
                 "neg_loss": float(neg_loss.detach().item()),
                 "reg_loss": float(reg_loss.detach().item()),
-                "anchor_vector_norm_mean": float(v_anchor.norm(dim=-1).mean().detach().item()),
-                "positive_vector_norm_mean": float(v_positive.norm(dim=-1).mean().detach().item()),
-                "target_vector_norm_mean": float(target.norm(dim=-1).mean().detach().item()),
-                "vector_error_norm_mean": float(diff.norm(dim=-1).mean().detach().item()),
+                "first_vector_norm_mean": float(v_first_anchor.norm(dim=-1).mean().detach().item()),
+                "second_vector_norm_mean": float(v_second_anchor.norm(dim=-1).mean().detach().item()),
+                "gt_first_norm_mean": float(gt_first_anchor.norm(dim=-1).mean().detach().item()),
+                "gt_second_norm_mean": float(gt_second_anchor.norm(dim=-1).mean().detach().item()),
+                "first_error_norm_mean": float((v_first_anchor - gt_first_anchor).norm(dim=-1).mean().detach().item()),
+                "second_error_norm_mean": float((v_second_anchor - gt_second_anchor).norm(dim=-1).mean().detach().item()),
+                "weight_first_sum_mean": float(weights_first_anchor.sum(dim=-1).mean().detach().item()),
+                "weight_second_sum_mean": float(weights_second_anchor.sum(dim=-1).mean().detach().item()),
             }
-
         return loss, stats
