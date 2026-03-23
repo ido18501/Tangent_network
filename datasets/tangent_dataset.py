@@ -71,7 +71,7 @@ class TangentDataset(Dataset):
         negative_min_offset: int = 5,
         negative_max_offset: int = 25,
         negative_other_curve_fraction: float = 0.5,
-        patch_mode: str = "jittered_symmetric",
+        patch_mode: str = "random_warp_symmetric",
         jitter_fraction: float = 0.25,
         closed: bool = True,
         transform_kwargs: dict[str, Any] | None = None,
