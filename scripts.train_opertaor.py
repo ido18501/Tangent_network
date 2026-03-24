@@ -18,13 +18,9 @@ from training.trainer import TangentTrainer
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-
-    # Run / device
     p.add_argument("--run-dir", type=str, required=True)
     p.add_argument("--device", type=str, default="cuda")
-    p.add_argument("--num-workers", type=int, default=2)
-
-    # Dataset lengths / seeds
+    p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--train-length", type=int, default=5000)
     p.add_argument("--val-length", type=int, default=1500)
     p.add_argument("--test-length", type=int, default=1500)
@@ -32,11 +28,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--val-seed", type=int, default=2000)
     p.add_argument("--test-seed", type=int, default=3000)
     p.add_argument("--global-seed", type=int, default=123)
-
-    # Transform family
     p.add_argument("--transform-family", type=str, default="euclidean", choices=["euclidean"])
-
-    # Curve generation
     p.add_argument("--num-curve-points", type=int, default=300)
     p.add_argument("--fourier-max-freq", type=int, default=5)
     p.add_argument("--fourier-scale", type=float, default=0.9)
@@ -46,8 +38,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--curve-max-size", type=float, default=0.75)
     p.add_argument("--mixed-fourier-prob", type=float, default=1.0)
     p.add_argument("--mixed-piecewise-prob", type=float, default=0.0)
-
-    # Patch sampling
     p.add_argument("--patch-size", type=int, default=11)
     p.add_argument("--half-width", type=int, default=12)
     p.add_argument("--num-negatives", type=int, default=8)
@@ -56,58 +46,53 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--negative-other-curve-fraction", type=float, default=0.5)
     p.add_argument("--sampling-mode", type=str, default="random_warp_symmetric")
     p.add_argument("--jitter-fraction", type=float, default=0.30)
-
-    # Curve / sampling options
     p.add_argument("--closed", action="store_true", default=True)
     p.add_argument("--no-closed", dest="closed", action="store_false")
     p.add_argument("--return-centered", action="store_true", default=True)
-
-    # Noise / warp
     p.add_argument("--point-noise-std", type=float, default=0.001)
     p.add_argument("--warp-sampling-prob", type=float, default=0.4)
     p.add_argument("--warp-sampling-strength", type=float, default=0.10)
     p.add_argument("--orthogonal-noise-std", type=float, default=0.002)
-
-    # GT derivative computation
     p.add_argument("--gt-dense-num-points", type=int, default=4096)
-
-    # Euclidean transform params
     p.add_argument("--rotation-deg", type=float, default=30.0)
     p.add_argument("--allow-reflection", action="store_true", default=True)
     p.add_argument("--no-reflection", dest="allow_reflection", action="store_false")
     p.add_argument("--translation-range", type=float, default=0.0)
-
-    # Model
     p.add_argument("--point-mlp-dims", type=int, nargs="+", default=[64, 64, 128])
     p.add_argument("--head-dims", type=int, nargs="+", default=[128, 64])
     p.add_argument("--use-batchnorm", action="store_true", default=True)
     p.add_argument("--no-batchnorm", dest="use_batchnorm", action="store_false")
     p.add_argument("--point-dropout", type=float, default=0.0)
     p.add_argument("--head-dropout", type=float, default=0.0)
-
-    # Optimization
     p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--num-epochs", type=int, default=50)
+    p.add_argument("--early-stopping-patience", type=int, default=8)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--grad-clip-norm", type=float, default=None)
-
-    # Two-stage training schedule
-    p.add_argument("--stage1-epochs", type=int, default=20)
-    p.add_argument("--stage2-epochs", type=int, default=20)
-    p.add_argument("--stage1-patience", type=int, default=6)
-    p.add_argument("--stage2-patience", type=int, default=8)
-    p.add_argument("--stage2-lr-scale", type=float, default=0.2)
-
-    # Loss weights (raw, globally normalized inside loss)
+    p.add_argument("--lambda-reg", type=float, default=1e-4)
+    p.add_argument("--lambda-neg", type=float, default=0.1)
+    p.add_argument("--neg-margin", type=float, default=0.05)
+    p.add_argument("--lambda-first", type=float, default=1.0)
+    p.add_argument("--lambda-second", type=float, default=1.0)
+    p.add_argument("--lambda-equiv-first", type=float, default=1.0)
+    p.add_argument("--lambda-equiv-second", type=float, default=1.0)
+    p.add_argument("--lambda-second-dir-max", type=float, default=0.05)
+    p.add_argument("--lambda-second-mag-max", type=float, default=0.005)
+    p.add_argument("--second-warmup-epochs", type=int, default=3)
+    p.add_argument("--second-ramp-epochs", type=int, default=5)
+    p.add_argument("--second-phase-lr-scale", type=float, default=0.2)
     p.add_argument("--raw-lambda-reg", type=float, default=1e-4)
     p.add_argument("--raw-lambda-neg", type=float, default=0.1)
     p.add_argument("--neg-margin", type=float, default=0.05)
     p.add_argument("--raw-lambda-first", type=float, default=1.0)
     p.add_argument("--raw-lambda-equiv-first", type=float, default=1.0)
     p.add_argument("--raw-lambda-equiv-second", type=float, default=1.0)
-    p.add_argument("--raw-lambda-second-total", type=float, default=0.03)
+    p.add_argument("--raw-lambda-second-total-max", type=float, default=0.05)
     p.add_argument("--second-dir-fraction", type=float, default=0.9)
-
+    p.add_argument("--second-warmup-epochs", type=int, default=3)
+    p.add_argument("--second-ramp-epochs", type=int, default=5)
+    p.add_argument("--second-phase-lr-scale", type=float, default=0.2)
     return p.parse_args()
 
 
@@ -119,13 +104,8 @@ def set_global_seed(seed: int) -> None:
 
 
 def build_curve_family_probs(args: argparse.Namespace) -> dict[str, float]:
-    probs = {
-        "fourier": args.mixed_fourier_prob,
-        "piecewise": args.mixed_piecewise_prob,
-    }
+    probs = {"fourier": args.mixed_fourier_prob, "piecewise": args.mixed_piecewise_prob}
     total = sum(probs.values())
-    if total <= 0:
-        raise ValueError("At least one curve family probability must be positive.")
     return {k: v / total for k, v in probs.items()}
 
 
@@ -193,20 +173,16 @@ def save_json(path: Path, obj: dict) -> None:
 def main() -> None:
     args = parse_args()
     set_global_seed(args.global_seed)
-
     print("TRAIN SCRIPT STARTED", flush=True)
-
     run_dir = Path(args.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir = run_dir / "checkpoints"
-
     save_json(run_dir / "args.json", vars(args))
     print(json.dumps(vars(args), indent=2), flush=True)
 
     train_dataset = build_dataset(args, args.train_length, args.train_seed)
     val_dataset = build_dataset(args, args.val_length, args.val_seed)
     test_dataset = build_dataset(args, args.test_length, args.test_seed)
-
     print(f"train length: {len(train_dataset)}", flush=True)
     print(f"val length: {len(val_dataset)}", flush=True)
     print(f"test length: {len(test_dataset)}", flush=True)
@@ -224,7 +200,6 @@ def main() -> None:
         point_dropout=args.point_dropout,
         head_dropout=args.head_dropout,
     )
-
     loss_fn = OperatorEuclideanDerivativeLoss(
         raw_lambda_reg=args.raw_lambda_reg,
         raw_lambda_neg=args.raw_lambda_neg,
@@ -232,16 +207,12 @@ def main() -> None:
         raw_lambda_first=args.raw_lambda_first,
         raw_lambda_equiv_first=args.raw_lambda_equiv_first,
         raw_lambda_equiv_second=args.raw_lambda_equiv_second,
-        raw_lambda_second_total=args.raw_lambda_second_total,
+        raw_lambda_second_total_max=args.raw_lambda_second_total_max,
         second_dir_fraction=args.second_dir_fraction,
+        second_warmup_epochs=args.second_warmup_epochs,
+        second_ramp_epochs=args.second_ramp_epochs,
     )
-
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
-
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     trainer = TangentTrainer(
         model=model,
         optimizer=optimizer,
@@ -249,24 +220,13 @@ def main() -> None:
         device=args.device,
         grad_clip_norm=args.grad_clip_norm,
         checkpoint_dir=checkpoints_dir,
-        stage1_epochs=args.stage1_epochs,
-        stage2_epochs=args.stage2_epochs,
-        stage1_patience=args.stage1_patience,
-        stage2_patience=args.stage2_patience,
-        stage2_lr_scale=args.stage2_lr_scale,
+        second_warmup_epochs=args.second_warmup_epochs,
+        second_phase_lr_scale=args.second_phase_lr_scale,
     )
 
-    best_model_path = trainer.fit(train_loader, val_loader)
+    best_model_path = trainer.fit(train_loader, val_loader, args.num_epochs, args.early_stopping_patience)
     test_metrics = trainer.evaluate(test_loader)
-
-    save_json(
-        run_dir / "summary.json",
-        {
-            "best_model_path": str(best_model_path),
-            "test_metrics": test_metrics,
-        },
-    )
-
+    save_json(run_dir / "summary.json", {"best_model_path": str(best_model_path), "test_metrics": test_metrics})
     torch.save(model.state_dict(), run_dir / "final_model.pt")
 
 
